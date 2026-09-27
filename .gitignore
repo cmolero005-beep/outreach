@@ -1,0 +1,8 @@
+config.ini
+outreach.xlsx
+outreach_UPDATED_*.xlsx
+~$*.xlsx
+backups/
+logs/
+__pycache__/
+.venv/
