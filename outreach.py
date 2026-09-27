@@ -21,6 +21,7 @@ import configparser
 import datetime as dt
 import imaplib
 import logging
+import mimetypes
 import random
 import re
 import shutil
@@ -128,6 +129,9 @@ def check_placeholders(text, path):
             )
 
 
+ATTACHMENT_TYPES = {".pdf", ".docx", ".doc"}
+
+
 class TemplateSet:
     def __init__(self, folder):
         self.name = folder.name
@@ -137,6 +141,10 @@ class TemplateSet:
         self.subj2, self.body2 = load_template(folder / "follow_up_email.txt")
         used = placeholders_used(self.subj1 + self.body1 + (self.subj2 or "") + self.body2)
         self.needed = REQUIRED_FOR_SEND + sorted(used - set(REQUIRED_FOR_SEND))
+        # Any PDF/Word file in the folder (e.g. your resume) is attached to the FIRST email.
+        self.attachments = sorted(f for f in folder.iterdir()
+                                  if f.suffix.lower() in ATTACHMENT_TYPES and not f.name.startswith("~$"))
+        self.missing_attachment = "attach" in self.body1.lower() and not self.attachments
 
     def first(self, row):
         return render(self.subj1, row), render(self.body1, row)
@@ -262,7 +270,7 @@ class SmtpImapMailer:
             self.smtp.login(self.address, self.password)
         return self.smtp
 
-    def send(self, to, subject, body, in_reply_to=None):
+    def send(self, to, subject, body, in_reply_to=None, attachments=()):
         msg = EmailMessage()
         msg["From"] = formataddr((self.name, self.address)) if self.name else self.address
         msg["To"] = to
@@ -272,6 +280,10 @@ class SmtpImapMailer:
             msg["In-Reply-To"] = in_reply_to
             msg["References"] = in_reply_to
         msg.set_content(body)
+        for path in attachments:
+            ctype = mimetypes.guess_type(str(path))[0] or "application/octet-stream"
+            maintype, subtype = ctype.split("/", 1)
+            msg.add_attachment(Path(path).read_bytes(), maintype=maintype, subtype=subtype, filename=Path(path).name)
         self._smtp().send_message(msg)
         return msg["Message-ID"]
 
@@ -341,6 +353,13 @@ on run argv
             set m to make new outgoing message with properties {subject:subj, content:bodyText, visible:false}
             if fromAddr is not "" then set sender of m to fromAddr
             tell m to make new to recipient at end of to recipients with properties {address:toAddr}
+            if (count of argv) > 4 then
+                repeat with i from 5 to (count of argv)
+                    set f to POSIX file (item i of argv)
+                    tell content of m to make new attachment with properties {file name:f} at after last paragraph
+                end repeat
+                delay 3
+            end if
             set ok to send m
         end tell
     end timeout
@@ -402,8 +421,9 @@ class AppleMailMailer:
     def check_connection(self):
         self._osascript('tell application "Mail" to return (count of accounts) as text')
 
-    def send(self, to, subject, body, in_reply_to=None):
-        out = self._osascript(APPLESCRIPT_SEND, to, subject, body, self.sender)
+    def send(self, to, subject, body, in_reply_to=None, attachments=()):
+        out = self._osascript(APPLESCRIPT_SEND, to, subject, body, self.sender,
+                              *[str(Path(a).resolve()) for a in attachments])
         if out != "OK":
             raise RuntimeError("Mail app refused to send the message")
         return ""
@@ -467,12 +487,16 @@ def cmd_preview(cfg, sheet_path):
             print(f"--- row {row['_row']}: SKIPPED, no template for Commonality "
                   f"'{row.get(COL_COMMON) or ''}' (have: {templates.names()})\n")
             continue
+        if tpl.missing_attachment:
+            print(f"--- row {row['_row']}: SKIPPED, email says 'attached' but no resume PDF in templates/{tpl.name}/\n")
+            continue
         miss = missing_fields(row, tpl.needed)
         if miss:
             print(f"--- row {row['_row']}: SKIPPED, missing {', '.join(miss)}\n")
             continue
         subj, body = tpl.first(row)
-        print(f"--- row {row['_row']}  To: {row[COL_EMAIL]}\nSubject: {subj}\n\n{body}")
+        att = f"\nAttachments: {', '.join(a.name for a in tpl.attachments)}" if tpl.attachments else ""
+        print(f"--- row {row['_row']}  To: {row[COL_EMAIL]}\nSubject: {subj}{att}\n\n{body}")
     for row in followups:
         tpl = templates.for_row(row)
         if tpl:
@@ -484,11 +508,14 @@ def cmd_test(cfg):
     mailer = make_mailer(cfg)
     me = cfg["email"]["address"].strip()
     for tpl in Templates(cfg).sets.values():
+        if tpl.missing_attachment:
+            print(f"Skipping '{tpl.name}': the email mentions an attachment but templates/{tpl.name}/ has no PDF.")
+            continue
         sample = {COL_FIRST: "Alex", COL_LAST: "Sample", COL_EMAIL: me, COL_COMPANY: "Acme Corp",
                   COL_ROLE: "Account Executive", COL_AREA: "sales", COL_COMMON: tpl.name}
         subj, body = tpl.first(sample)
         sample[COL_SUBJECT] = "[TEST] " + subj
-        mid = mailer.send(me, sample[COL_SUBJECT], body)
+        mid = mailer.send(me, sample[COL_SUBJECT], body, attachments=tpl.attachments)
         subj2, body2 = tpl.follow_up(sample)
         mailer.send(me, subj2, body2, in_reply_to=mid)
         print(f"Sent test first email + follow-up for template '{tpl.name}' to {me}.")
@@ -581,6 +608,9 @@ def cmd_run(cfg, sheet_path, force=False):
                 sheet.set(row, COL_DELIVERY, f"Waiting: no template for '{row.get(COL_COMMON) or ''}'"
                           f" (have: {templates.names()})")
                 continue
+            if tpl.missing_attachment:
+                sheet.set(row, COL_DELIVERY, f"Waiting: put your resume PDF in templates/{tpl.name}/")
+                continue
             miss = missing_fields(row, tpl.needed)
             if miss:
                 sheet.set(row, COL_DELIVERY, f"Waiting: fill in {', '.join(miss)}")
@@ -593,7 +623,7 @@ def cmd_run(cfg, sheet_path, force=False):
             try:
                 if sent:
                     pause()
-                msg_id = mailer.send(to, subj, body)
+                msg_id = mailer.send(to, subj, body, attachments=tpl.attachments)
                 sheet.set(row, COL_STATUS, STATUS_SENT)
                 sheet.set(row, COL_DATE_SENT, today, "yyyy-mm-dd")
                 sheet.set(row, COL_DELIVERY, "Sent")

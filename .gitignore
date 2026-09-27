@@ -6,3 +6,6 @@ backups/
 logs/
 __pycache__/
 .venv/
+templates/*/*.pdf
+templates/*/*.docx
+templates/*/*.doc

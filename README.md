@@ -21,6 +21,10 @@ message from your university account, through the Mac **Mail** app. If someone h
    `templates/SNHU/follow_up_email.txt`. A row whose Commonality is `SNHU` gets the SNHU emails.
    To add another commonality, copy the SNHU folder, rename it (e.g. `Soccer`), and edit the text.
    Placeholders: `[First Name]`, `[Area]`, `[Company]`, `[Role]`, `[Last Name]`.
+   Templates so far: `SNHU` (for SNHU alumni) and `General` (everyone else).
+   **Put your resume PDF inside `templates/General/`.** Any PDF/Word file in a template folder is attached
+   to that template's first email (not the follow-up). The General email says "I've attached my resume",
+   so General contacts wait until the PDF is there. Resumes are never uploaded to GitHub.
 4. **Test it:**
    ```
    python3 outreach.py check          # macOS asks "Terminal wants to control Mail" -> click OK
