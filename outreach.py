@@ -54,7 +54,7 @@ COL_FOLLOW_UP = "Follow Up"
 COL_MSG_ID = "Message ID"  # hidden helper column, used to thread the follow-up
 COL_SUBJECT = "Subject Sent"  # hidden helper column
 
-REQUIRED_FOR_SEND = [COL_FIRST, COL_EMAIL, COL_AREA]
+REQUIRED_FOR_SEND = [COL_FIRST, COL_EMAIL, COL_AREA, COL_COMMON]
 
 STATUS_SENT = "Sent"
 STATUS_FOLLOWED_UP = "Followed Up"
@@ -126,6 +126,43 @@ def check_placeholders(text, path):
                 f"Unknown placeholder [{m.group(1)}] in {path}. "
                 f"Allowed: {', '.join('[' + k.title() + ']' for k in PLACEHOLDERS)}"
             )
+
+
+class TemplateSet:
+    def __init__(self, folder):
+        self.name = folder.name
+        self.subj1, self.body1 = load_template(folder / "initial_email.txt")
+        if not self.subj1:
+            sys.exit(f"{folder.name}/initial_email.txt needs a 'Subject: ...' first line.")
+        self.subj2, self.body2 = load_template(folder / "follow_up_email.txt")
+        used = placeholders_used(self.subj1 + self.body1 + (self.subj2 or "") + self.body2)
+        self.needed = REQUIRED_FOR_SEND + sorted(used - set(REQUIRED_FOR_SEND))
+
+    def first(self, row):
+        return render(self.subj1, row), render(self.body1, row)
+
+    def follow_up(self, row):
+        orig = str(row.get(COL_SUBJECT) or render(self.subj1, row))
+        subj = render(self.subj2, row) if self.subj2 else ("Re: " + orig if not orig.startswith("Re:") else orig)
+        return subj, render(self.body2, row)
+
+
+class Templates:
+    """One folder per commonality: templates/<Commonality>/initial_email.txt + follow_up_email.txt.
+    The row's Commonality value (e.g. SNHU) picks the folder, ignoring upper/lower case."""
+
+    def __init__(self, cfg):
+        root = HERE / cfg["settings"].get("templates_dir", "templates")
+        self.sets = {d.name.strip().lower(): TemplateSet(d) for d in sorted(root.iterdir())
+                     if d.is_dir() and (d / "initial_email.txt").exists()}
+        if not self.sets:
+            sys.exit(f"No templates found in {root}. Expected {root}/<Commonality>/initial_email.txt")
+
+    def for_row(self, row):
+        return self.sets.get(str(row.get(COL_COMMON) or "").strip().lower())
+
+    def names(self):
+        return ", ".join(t.name for t in self.sets.values())
 
 
 def placeholders_used(text):
@@ -421,34 +458,41 @@ def plan(sheet, cfg, today):
 def cmd_preview(cfg, sheet_path):
     today = dt.date.today()
     sheet = Sheet(sheet_path)
-    subj1, body1 = load_template(HERE / cfg["settings"].get("initial_template", "templates/initial_email.txt"))
-    subj2, body2 = load_template(HERE / cfg["settings"].get("follow_up_template", "templates/follow_up_email.txt"))
+    templates = Templates(cfg)
     initial, followups = plan(sheet, cfg, today)
-    need = REQUIRED_FOR_SEND + sorted(placeholders_used((subj1 or "") + body1))
-    print(f"=== {len(initial)} first email(s), {len(followups)} follow-up(s) would go out ===\n")
+    print(f"=== {len(initial)} new contact(s), {len(followups)} follow-up(s) due ===\n")
     for row in initial:
-        miss = missing_fields(row, need)
+        tpl = templates.for_row(row)
+        if not tpl:
+            print(f"--- row {row['_row']}: SKIPPED, no template for Commonality "
+                  f"'{row.get(COL_COMMON) or ''}' (have: {templates.names()})\n")
+            continue
+        miss = missing_fields(row, tpl.needed)
         if miss:
             print(f"--- row {row['_row']}: SKIPPED, missing {', '.join(miss)}\n")
             continue
-        print(f"--- row {row['_row']}  To: {row[COL_EMAIL]}\nSubject: {render(subj1, row)}\n\n{render(body1, row)}")
+        subj, body = tpl.first(row)
+        print(f"--- row {row['_row']}  To: {row[COL_EMAIL]}\nSubject: {subj}\n\n{body}")
     for row in followups:
-        subj = render(subj2, row) if subj2 else "Re: " + str(row.get(COL_SUBJECT) or render(subj1, row))
-        print(f"--- FOLLOW-UP row {row['_row']}  To: {row[COL_EMAIL]}\nSubject: {subj}\n\n{render(body2, row)}")
+        tpl = templates.for_row(row)
+        if tpl:
+            subj, body = tpl.follow_up(row)
+            print(f"--- FOLLOW-UP row {row['_row']}  To: {row[COL_EMAIL]}\nSubject: {subj}\n\n{body}")
 
 
 def cmd_test(cfg):
     mailer = make_mailer(cfg)
     me = cfg["email"]["address"].strip()
-    sample = {COL_FIRST: "Alex", COL_LAST: "Sample", COL_EMAIL: me, COL_COMPANY: "Acme Corp",
-              COL_ROLE: "Account Executive", COL_AREA: "sales", COL_COMMON: "we both went to State U"}
-    subj1, body1 = load_template(HERE / cfg["settings"].get("initial_template", "templates/initial_email.txt"))
-    subj2, body2 = load_template(HERE / cfg["settings"].get("follow_up_template", "templates/follow_up_email.txt"))
-    s1 = "[TEST] " + render(subj1, sample)
-    mid = mailer.send(me, s1, render(body1, sample))
-    mailer.send(me, render(subj2, sample) if subj2 else "Re: " + s1, render(body2, sample), in_reply_to=mid)
+    for tpl in Templates(cfg).sets.values():
+        sample = {COL_FIRST: "Alex", COL_LAST: "Sample", COL_EMAIL: me, COL_COMPANY: "Acme Corp",
+                  COL_ROLE: "Account Executive", COL_AREA: "sales", COL_COMMON: tpl.name}
+        subj, body = tpl.first(sample)
+        sample[COL_SUBJECT] = "[TEST] " + subj
+        mid = mailer.send(me, sample[COL_SUBJECT], body)
+        subj2, body2 = tpl.follow_up(sample)
+        mailer.send(me, subj2, body2, in_reply_to=mid)
+        print(f"Sent test first email + follow-up for template '{tpl.name}' to {me}.")
     mailer.close()
-    print(f"Sent 2 test emails to {me}. Check your inbox.")
 
 
 def cmd_run(cfg, sheet_path, force=False):
@@ -460,11 +504,7 @@ def cmd_run(cfg, sheet_path, force=False):
     max_per_day = s.getint("max_emails_per_day", 25)
     delay_min, delay_max = s.getint("min_seconds_between_emails", 30), s.getint("max_seconds_between_emails", 90)
 
-    subj1, body1 = load_template(HERE / s.get("initial_template", "templates/initial_email.txt"))
-    subj2, body2 = load_template(HERE / s.get("follow_up_template", "templates/follow_up_email.txt"))
-    if not subj1:
-        sys.exit("The first-email template needs a 'Subject: ...' first line.")
-    need1 = REQUIRED_FOR_SEND + sorted(placeholders_used(subj1 + body1) - set(REQUIRED_FOR_SEND))
+    templates = Templates(cfg)
 
     # Back up the sheet before touching it.
     backup_dir = HERE / "backups"
@@ -514,12 +554,15 @@ def cmd_run(cfg, sheet_path, force=False):
             if sent >= max_per_day:
                 break
             to = str(row[COL_EMAIL]).strip()
-            orig_subject = str(row.get(COL_SUBJECT) or render(subj1, row))
-            subj = render(subj2, row) if subj2 else "Re: " + orig_subject
+            tpl = templates.for_row(row)
+            if not tpl:
+                log.warning("No template for %s's Commonality '%s'; follow-up not sent.", to, row.get(COL_COMMON))
+                continue
+            subj, body = tpl.follow_up(row)
             try:
                 if sent:
                     pause()
-                mailer.send(to, subj, render(body2, row), in_reply_to=row.get(COL_MSG_ID) or None)
+                mailer.send(to, subj, body, in_reply_to=row.get(COL_MSG_ID) or None)
                 sheet.set(row, COL_FOLLOW_UP, today, "yyyy-mm-dd")
                 sheet.set(row, COL_STATUS, STATUS_FOLLOWED_UP)
                 sent += 1
@@ -533,7 +576,12 @@ def cmd_run(cfg, sheet_path, force=False):
             if sent >= max_per_day:
                 log.info("Daily limit (%d) reached; the rest go out on the next workday.", max_per_day)
                 break
-            miss = missing_fields(row, need1)
+            tpl = templates.for_row(row)
+            if not tpl:
+                sheet.set(row, COL_DELIVERY, f"Waiting: no template for '{row.get(COL_COMMON) or ''}'"
+                          f" (have: {templates.names()})")
+                continue
+            miss = missing_fields(row, tpl.needed)
             if miss:
                 sheet.set(row, COL_DELIVERY, f"Waiting: fill in {', '.join(miss)}")
                 continue
@@ -541,11 +589,11 @@ def cmd_run(cfg, sheet_path, force=False):
             if not re.fullmatch(r"[^@\s]+@[^@\s]+\.[^@\s]+", to):
                 sheet.set(row, COL_DELIVERY, "Invalid email address")
                 continue
-            subj = render(subj1, row)
+            subj, body = tpl.first(row)
             try:
                 if sent:
                     pause()
-                msg_id = mailer.send(to, subj, render(body1, row))
+                msg_id = mailer.send(to, subj, body)
                 sheet.set(row, COL_STATUS, STATUS_SENT)
                 sheet.set(row, COL_DATE_SENT, today, "yyyy-mm-dd")
                 sheet.set(row, COL_DELIVERY, "Sent")

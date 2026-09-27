@@ -17,8 +17,10 @@ message from your university account, through the Mac **Mail** app. If someone h
    cp config.example.ini config.ini
    open -e config.ini                 # put your school email + name in, save
    ```
-3. Your email drafts are in `templates/initial_email.txt` and `templates/follow_up_email.txt`.
-   Placeholders: `[First Name]`, `[Area]`, `[Commonality]`, `[Company]`, `[Role]`, `[Last Name]`.
+3. Email templates live in one folder per commonality, e.g. `templates/SNHU/initial_email.txt` and
+   `templates/SNHU/follow_up_email.txt`. A row whose Commonality is `SNHU` gets the SNHU emails.
+   To add another commonality, copy the SNHU folder, rename it (e.g. `Soccer`), and edit the text.
+   Placeholders: `[First Name]`, `[Area]`, `[Company]`, `[Role]`, `[Last Name]`.
 4. **Test it:**
    ```
    python3 outreach.py check          # macOS asks "Terminal wants to control Mail" -> click OK
@@ -32,7 +34,7 @@ message from your university account, through the Mac **Mail** app. If someone h
 
 ## Daily use
 
-- Add people on the **Contacts** tab. First Name, Email, Area and Commonality are required. Leave Status empty.
+- Add people on the **Contacts** tab. First Name, Email, Area and Commonality are required. Commonality must match a template folder (e.g. `SNHU`). Leave Status empty.
 - **Close the Excel file before 11 AM** so the script's updates don't get overwritten.
 - Your Mac has to be on. If it's asleep or the lid is closed at 11, the run happens as soon as you open it.
 - Set Status to `Do Not Contact` to stop emailing someone.
