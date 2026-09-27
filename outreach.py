@@ -132,8 +132,15 @@ def check_placeholders(text, path):
 ATTACHMENT_TYPES = {".pdf", ".docx", ".doc"}
 
 
+def attachment_files(folder):
+    if not folder.is_dir():
+        return []
+    return sorted(f for f in folder.iterdir()
+                  if f.suffix.lower() in ATTACHMENT_TYPES and not f.name.startswith(("~$", ".")))
+
+
 class TemplateSet:
-    def __init__(self, folder):
+    def __init__(self, folder, resume_files):
         self.name = folder.name
         self.subj1, self.body1 = load_template(folder / "initial_email.txt")
         if not self.subj1:
@@ -141,10 +148,9 @@ class TemplateSet:
         self.subj2, self.body2 = load_template(folder / "follow_up_email.txt")
         used = placeholders_used(self.subj1 + self.body1 + (self.subj2 or "") + self.body2)
         self.needed = REQUIRED_FOR_SEND + sorted(used - set(REQUIRED_FOR_SEND))
-        # Any PDF/Word file in the folder (e.g. your resume) is attached to the FIRST email.
-        self.attachments = sorted(f for f in folder.iterdir()
-                                  if f.suffix.lower() in ATTACHMENT_TYPES and not f.name.startswith("~$"))
-        self.missing_attachment = "attach" in self.body1.lower() and not self.attachments
+        # Your resume (resume/ folder) plus any PDF/Word file in this template's folder go on the FIRST email.
+        self.attachments = list(resume_files) + attachment_files(folder)
+        self.missing_attachment = not resume_files
 
     def first(self, row):
         return render(self.subj1, row), render(self.body1, row)
@@ -161,7 +167,9 @@ class Templates:
 
     def __init__(self, cfg):
         root = HERE / cfg["settings"].get("templates_dir", "templates")
-        self.sets = {d.name.strip().lower(): TemplateSet(d) for d in sorted(root.iterdir())
+        self.resume_dir = HERE / cfg["settings"].get("resume_dir", "resume")
+        resume = attachment_files(self.resume_dir)
+        self.sets = {d.name.strip().lower(): TemplateSet(d, resume) for d in sorted(root.iterdir())
                      if d.is_dir() and (d / "initial_email.txt").exists()}
         if not self.sets:
             sys.exit(f"No templates found in {root}. Expected {root}/<Commonality>/initial_email.txt")
@@ -488,7 +496,7 @@ def cmd_preview(cfg, sheet_path):
                   f"'{row.get(COL_COMMON) or ''}' (have: {templates.names()})\n")
             continue
         if tpl.missing_attachment:
-            print(f"--- row {row['_row']}: SKIPPED, email says 'attached' but no resume PDF in templates/{tpl.name}/\n")
+            print(f"--- row {row['_row']}: SKIPPED, no resume PDF in the resume/ folder\n")
             continue
         miss = missing_fields(row, tpl.needed)
         if miss:
@@ -507,10 +515,10 @@ def cmd_preview(cfg, sheet_path):
 def cmd_test(cfg):
     mailer = make_mailer(cfg)
     me = cfg["email"]["address"].strip()
-    for tpl in Templates(cfg).sets.values():
-        if tpl.missing_attachment:
-            print(f"Skipping '{tpl.name}': the email mentions an attachment but templates/{tpl.name}/ has no PDF.")
-            continue
+    templates = Templates(cfg)
+    if not attachment_files(templates.resume_dir):
+        sys.exit(f"Put your resume PDF in {templates.resume_dir} first.")
+    for tpl in templates.sets.values():
         sample = {COL_FIRST: "Alex", COL_LAST: "Sample", COL_EMAIL: me, COL_COMPANY: "Acme Corp",
                   COL_ROLE: "Account Executive", COL_AREA: "sales", COL_COMMON: tpl.name}
         subj, body = tpl.first(sample)
@@ -609,7 +617,7 @@ def cmd_run(cfg, sheet_path, force=False):
                           f" (have: {templates.names()})")
                 continue
             if tpl.missing_attachment:
-                sheet.set(row, COL_DELIVERY, f"Waiting: put your resume PDF in templates/{tpl.name}/")
+                sheet.set(row, COL_DELIVERY, "Waiting: put your resume PDF in the resume/ folder")
                 continue
             miss = missing_fields(row, tpl.needed)
             if miss:

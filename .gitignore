@@ -9,3 +9,5 @@ __pycache__/
 templates/*/*.pdf
 templates/*/*.docx
 templates/*/*.doc
+resume/*
+!resume/README.txt

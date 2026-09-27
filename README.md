@@ -22,9 +22,9 @@ message from your university account, through the Mac **Mail** app. If someone h
    To add another commonality, copy the SNHU folder, rename it (e.g. `Soccer`), and edit the text.
    Placeholders: `[First Name]`, `[Area]`, `[Company]`, `[Role]`, `[Last Name]`.
    Templates so far: `SNHU` (for SNHU alumni) and `General` (everyone else).
-   **Put your resume PDF inside `templates/General/`.** Any PDF/Word file in a template folder is attached
-   to that template's first email (not the follow-up). The General email says "I've attached my resume",
-   so General contacts wait until the PDF is there. Resumes are never uploaded to GitHub.
+   **Put your resume PDF in the `resume/` folder.** It's attached to every first email (not to follow-ups).
+   No first emails go out until it's there. Your resume is never uploaded to GitHub.
+   To update your resume later, just replace the file in that folder.
 4. **Test it:**
    ```
    python3 outreach.py check          # macOS asks "Terminal wants to control Mail" -> click OK
