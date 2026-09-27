@@ -26,4 +26,27 @@ XML
 mkdir -p "$PROJECT/logs"
 launchctl unload "$PLIST" 2>/dev/null || true
 launchctl load "$PLIST"
+
+# Run a harmless 'check' once through launchd so macOS shows the
+# "python3 wants to control Mail" prompt now (click OK), not silently at 11 AM.
+CHECK="$HOME/Library/LaunchAgents/com.outreach.permcheck.plist"
+cat > "$CHECK" <<XML
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+  <key>Label</key><string>com.outreach.permcheck</string>
+  <key>ProgramArguments</key><array><string>$PY</string><string>$PROJECT/outreach.py</string><string>check</string></array>
+  <key>WorkingDirectory</key><string>$PROJECT</string>
+  <key>RunAtLoad</key><true/>
+  <key>StandardOutPath</key><string>$PROJECT/logs/permcheck.log</string>
+  <key>StandardErrorPath</key><string>$PROJECT/logs/permcheck.log</string>
+</dict></plist>
+XML
+launchctl unload "$CHECK" 2>/dev/null || true
+launchctl load "$CHECK"
+echo "If a popup asks to let python3 control Mail, click OK. Waiting 20 seconds..."
+sleep 20
+launchctl unload "$CHECK" 2>/dev/null || true
+rm -f "$CHECK"
+cat "$PROJECT/logs/permcheck.log" 2>/dev/null | tail -3
 echo "Scheduled: runs Mon-Fri at 11:00 AM.  To remove: launchctl unload $PLIST && rm $PLIST"

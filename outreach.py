@@ -3,13 +3,14 @@
 Networking email outreach automation.
 
 Reads contacts from an Excel sheet, sends a personalized first email to every
-new row, sends one follow-up to people who haven't replied after N business
-days, and keeps the Status / Date Sent / Delivery / Replied / Follow Up columns
+new row, sends one follow-up to people who haven't replied after N days
+(7 by default), and keeps the Status / Date Sent / Delivery / Replied / Follow Up columns
 up to date.
 
 Commands:
     python outreach.py init        create outreach.xlsx from the template
     python outreach.py preview     show the emails that WOULD be sent (sends nothing)
+    python outreach.py check       make sure the script can talk to your mail app
     python outreach.py test        send both emails to yourself using a sample contact
     python outreach.py run         the daily job (the scheduler calls this at 11:00)
     python outreach.py run --force   run even on a weekend
@@ -199,15 +200,6 @@ def as_date(v):
     return None
 
 
-def business_days_between(start, end):
-    days, d = 0, start
-    while d < end:
-        d += dt.timedelta(days=1)
-        if d.weekday() < 5:
-            days += 1
-    return days
-
-
 # --------------------------------------------------------------------------- mail backends
 
 class SmtpImapMailer:
@@ -301,59 +293,93 @@ class SmtpImapMailer:
                 pass
 
 
-class OutlookMailer:
-    """Uses the classic Outlook desktop app on Windows (no password needed; works with
-    Microsoft 365 university accounts that block SMTP). Outlook must be installed and signed in."""
+APPLESCRIPT_SEND = r"""
+on run argv
+    set toAddr to item 1 of argv
+    set subj to item 2 of argv
+    set bodyText to item 3 of argv
+    set fromAddr to item 4 of argv
+    with timeout of 300 seconds
+        tell application "Mail"
+            set m to make new outgoing message with properties {subject:subj, content:bodyText, visible:false}
+            if fromAddr is not "" then set sender of m to fromAddr
+            tell m to make new to recipient at end of to recipients with properties {address:toAddr}
+            set ok to send m
+        end tell
+    end timeout
+    if ok then return "OK"
+    return "FAILED"
+end run
+"""
+
+APPLESCRIPT_CHECK = r"""
+on run argv
+    set addr to item 1 of argv
+    set d to current date
+    set year of d to (item 2 of argv) as integer
+    set day of d to 1
+    set month of d to (item 3 of argv) as integer
+    set day of d to (item 4 of argv) as integer
+    set time of d to 0
+    with timeout of 600 seconds
+        tell application "Mail"
+            set hits to (messages of inbox whose sender contains addr and date received >= d)
+            if (count of hits) > 0 then
+                set r to date received of item 1 of hits
+                return "REPLY " & ((year of r) as text) & "-" & ((month of r as integer) as text) & "-" & ((day of r) as text)
+            end if
+            set ndrs to (messages of inbox whose date received >= d and (subject contains "Undeliverable" or subject contains "Delivery Status Notification" or subject contains "Mail delivery failed" or subject contains "Returned mail"))
+            repeat with m in ndrs
+                if content of m contains addr then return "BOUNCE"
+            end repeat
+        end tell
+    end timeout
+    return "NONE"
+end run
+"""
+
+
+class AppleMailMailer:
+    """Sends and checks replies through the Mac's built-in Mail app.
+
+    Add your university Outlook / Microsoft 365 account to Mail once (Mail > Settings > Accounts,
+    'Microsoft Exchange' or 'Sign in with Microsoft'). No password is stored by this script."""
 
     def __init__(self, cfg):
-        try:
-            import win32com.client  # noqa: F401
-        except ImportError:
-            sys.exit("Outlook mode needs pywin32:  pip install pywin32")
-        import win32com.client
-        self.app = win32com.client.Dispatch("Outlook.Application")
-        self.ns = self.app.GetNamespace("MAPI")
-        self.address = cfg["email"].get("address", "").strip()
+        if sys.platform != "darwin":
+            sys.exit("method = applemail only works on a Mac.")
+        s = cfg["email"]
+        address = s.get("address", "").strip()
+        name = s.get("display_name", "").strip()
+        self.sender = f"{name} <{address}>" if name and address else address
+
+    @staticmethod
+    def _osascript(script, *args, timeout=900):
+        import subprocess
+        r = subprocess.run(["osascript", "-e", script, *[str(a) for a in args]],
+                           capture_output=True, text=True, timeout=timeout)
+        if r.returncode != 0:
+            raise RuntimeError((r.stderr or r.stdout).strip() or "osascript failed")
+        return r.stdout.strip()
 
     def check_connection(self):
-        self.ns.GetDefaultFolder(6)  # Inbox
+        self._osascript('tell application "Mail" to return (count of accounts) as text')
 
     def send(self, to, subject, body, in_reply_to=None):
-        mail = self.app.CreateItem(0)
-        mail.To = to
-        mail.Subject = subject
-        mail.Body = body
-        if self.address:
-            for acct in self.ns.Accounts:
-                if acct.SmtpAddress.lower() == self.address.lower():
-                    mail._oleobj_.Invoke(*(64209, 0, 8, 0, acct))  # SendUsingAccount
-                    break
-        mail.Send()
+        out = self._osascript(APPLESCRIPT_SEND, to, subject, body, self.sender)
+        if out != "OK":
+            raise RuntimeError("Mail app refused to send the message")
         return ""
 
     def find_replies_and_bounces(self, contacts):
         replied, bounced = {}, set()
-        if not contacts:
-            return replied, bounced
-        inbox = self.ns.GetDefaultFolder(6)
-        oldest = min(since for _, since in contacts)
-        items = inbox.Items.Restrict(f"[ReceivedTime] >= '{oldest:%m/%d/%Y} 00:00'")
-        wanted = {e.lower(): since for e, since in contacts}
-        for item in items:
-            try:
-                sender = (getattr(item, "SenderEmailAddress", "") or "").lower()
-                if item.Class == 43 and getattr(item, "SenderEmailType", "") == "EX":
-                    sender = item.Sender.GetExchangeUser().PrimarySmtpAddress.lower()
-                received = item.ReceivedTime.date()
-                if sender in wanted and received >= wanted[sender]:
-                    replied.setdefault(sender, received)
-                elif item.Class == 46 or "undeliverable" in (item.Subject or "").lower():  # NDR
-                    body = (item.Body or "").lower()
-                    for e in wanted:
-                        if e in body:
-                            bounced.add(e)
-            except Exception:
-                continue
+        for email_addr, since in contacts:
+            out = self._osascript(APPLESCRIPT_CHECK, email_addr, since.year, since.month, since.day)
+            if out.startswith("REPLY"):
+                y, m, d = (int(x) for x in out.split()[1].split("-"))
+                replied[email_addr.lower()] = dt.date(y, m, d)
+            elif out == "BOUNCE":
+                bounced.add(email_addr.lower())
         return replied, bounced
 
     def close(self):
@@ -361,8 +387,8 @@ class OutlookMailer:
 
 
 def make_mailer(cfg):
-    method = cfg["email"].get("method", "smtp").strip().lower()
-    return OutlookMailer(cfg) if method == "outlook" else SmtpImapMailer(cfg)
+    method = cfg["email"].get("method", "applemail").strip().lower()
+    return SmtpImapMailer(cfg) if method == "smtp" else AppleMailMailer(cfg)
 
 
 # --------------------------------------------------------------------------- core
@@ -374,7 +400,7 @@ def missing_fields(row, needed):
 def plan(sheet, cfg, today):
     """Decide what to send. Returns (initial_rows, followup_rows)."""
     s = cfg["settings"]
-    follow_after = s.getint("follow_up_after_business_days", 5)
+    follow_after = s.getint("follow_up_after_days", 7)
     initial, followups = [], []
     for row in sheet.rows():
         status = str(row.get(COL_STATUS) or "").strip()
@@ -387,7 +413,7 @@ def plan(sheet, cfg, today):
             sent_on = as_date(row.get(COL_DATE_SENT))
             if replied.startswith("y") or row.get(COL_FOLLOW_UP) or not sent_on:
                 continue
-            if business_days_between(sent_on, today) >= follow_after:
+            if (today - sent_on).days >= follow_after:
                 followups.append(row)
     return initial, followups
 
@@ -522,7 +548,7 @@ def cmd_run(cfg, sheet_path, force=False):
                 msg_id = mailer.send(to, subj, render(body1, row))
                 sheet.set(row, COL_STATUS, STATUS_SENT)
                 sheet.set(row, COL_DATE_SENT, today, "yyyy-mm-dd")
-                sheet.set(row, COL_DELIVERY, "Delivered to server")
+                sheet.set(row, COL_DELIVERY, "Sent")
                 sheet.set(row, COL_REPLIED, "No")
                 sheet.set(row, COL_MSG_ID, msg_id)
                 sheet.set(row, COL_SUBJECT, subj)

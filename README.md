@@ -1,37 +1,43 @@
-# Networking Outreach Automation
+# Networking Outreach Automation (Mac + university Outlook)
 
-You fill in a row in Excel. Every weekday at 11:00 AM your computer emails each new person a personalized
-message from your university account. If someone hasn't replied after 5 workdays, they get one follow-up,
-sent as a reply in the same thread. The sheet updates itself: Status, Date Sent, Delivery, Replied, Follow Up.
+You fill in a row in Excel. Every weekday at 11:00 AM your Mac emails each new person a personalized
+message from your university account, through the Mac **Mail** app. If someone hasn't replied within
+7 days, they get one follow-up. The sheet updates itself: Status, Date Sent, Delivery, Replied, Follow Up.
 
 ## One-time setup (about 10 minutes)
 
-1. Install Python 3 (python.org). On Windows, tick **"Add Python to PATH"**.
-2. Open a terminal in this folder and run:
+1. **Add your university email to the Mail app.** Open Mail > Settings > Accounts > **+** > **Microsoft Exchange**,
+   then choose **Sign In** and log in with your school account the same way you would on the Outlook website.
+   (You can keep using Outlook too. Mail only has to be set up; you don't have to use it day to day.)
+2. **Get the project onto your Mac.** Download this repo and open **Terminal** in the folder
+   (Finder: right-click the folder > Services > New Terminal at Folder). Then:
    ```
-   pip install -r requirements.txt
-   python outreach.py init            # creates outreach.xlsx (your contact list)
+   python3 -m pip install --user -r requirements.txt
+   python3 outreach.py init           # creates outreach.xlsx (your contact list)
+   cp config.example.ini config.ini
+   open -e config.ini                 # put your school email + name in, save
    ```
-3. Copy `config.example.ini` to `config.ini` and fill in your email settings (see the notes inside it).
-4. Paste your drafts into `templates/initial_email.txt` and `templates/follow_up_email.txt`.
+3. Your email drafts are in `templates/initial_email.txt` and `templates/follow_up_email.txt`.
    Placeholders: `[First Name]`, `[Area]`, `[Commonality]`, `[Company]`, `[Role]`, `[Last Name]`.
-5. Check that it works:
+4. **Test it:**
    ```
-   python outreach.py check           # can it log in?
-   python outreach.py test            # sends both emails to YOURSELF with a fake contact
-   python outreach.py preview         # shows exactly what would go out to your real list (sends nothing)
+   python3 outreach.py check          # macOS asks "Terminal wants to control Mail" -> click OK
+   python3 outreach.py test           # sends both emails to YOURSELF with a fake contact
+   python3 outreach.py preview        # shows exactly what would go out to your real list (sends nothing)
    ```
-6. Turn on the daily 11 AM weekday schedule:
-   - **Windows:** `powershell -ExecutionPolicy Bypass -File scheduling\schedule_windows.ps1`
-   - **Mac:** `bash scheduling/schedule_mac.sh`
+5. **Turn on the weekday 11 AM schedule:**
+   ```
+   bash scheduling/schedule_mac.sh    # if a popup asks to let python3 control Mail, click OK
+   ```
 
 ## Daily use
 
 - Add people on the **Contacts** tab. First Name, Email, Area and Commonality are required. Leave Status empty.
-- **Close the Excel file before 11 AM** so the script can save its updates.
-- Your computer has to be on (asleep is OK on Mac, and on Windows it catches up when you wake it).
+- **Close the Excel file before 11 AM** so the script's updates don't get overwritten.
+- Your Mac has to be on. If it's asleep or the lid is closed at 11, the run happens as soon as you open it.
 - Set Status to `Do Not Contact` to stop emailing someone.
 - Logs are in `logs/outreach.log`. The sheet is backed up to `backups/` before every run.
+- To turn the schedule off: `launchctl unload ~/Library/LaunchAgents/com.outreach.daily.plist`
 
 ## Safety limits (change in config.ini)
 - At most 25 emails a day, with a random 30–90 second pause between them, so your school account doesn't get flagged.
